@@ -5,6 +5,7 @@
 Paper: https://arxiv.org/pdf/2112.10759.pdf
 """
 
+from turtle import shape
 import numpy as np
 import torch
 import torch.nn as nn
@@ -882,7 +883,7 @@ class NeRFSynthesisNetwork(nn.Module):
 
         self.fg_embedder = Embedder(**embed_cfg)
 
-        input_dim = self.fg_embedder.out_dim + self.fv_cfg['output_channels']
+        input_dim = self.fg_embedder.out_dim + self.fv_cfg['output_channels']*3
 
         self.fg_mlps = self.build_mlp(input_dim=input_dim, **fg_cfg)
         self.fg_density = DenseLayer(in_channels=fg_cfg['hidden_dim'],
@@ -970,7 +971,7 @@ class NeRFSynthesisNetwork(nn.Module):
             fvw = w[:, 0]
         else:
             fvw = w
-        volume = self.fv(fvw)
+        plane,line = self.fv(fvw)
         # interpolate features from feature volume
         # point features: batch_size, num_channel, num_point
         bounds = self.fv_cfg.get('bounds', [[-0.1886, -0.1671, -0.1956],
@@ -978,7 +979,7 @@ class NeRFSynthesisNetwork(nn.Module):
         bounds = torch.Tensor(bounds).to(pts)
 
         fg_pts_sam = rearrange(fg_pts, 'bs nump numd c -> bs (nump numd) c')
-        input_f = interpolate_feature(fg_pts_sam, volume, bounds)
+        input_f = interpolate_feature(fg_pts_sam, plane, line , bounds)
         input_f = rearrange(input_f, 'bs c numd -> bs c numd 1')
         x = torch.cat([input_f, x], dim=1)
 
@@ -1033,22 +1034,47 @@ def kaiming_leaky_init(m):
                                       mode='fan_in',
                                       nonlinearity='leaky_relu')
 
-class InstanceNormLayer(nn.Module):
+class InstanceNormLayer_plane(nn.Module):
     """Implements instance normalization layer."""
     def __init__(self, num_features, epsilon=1e-8, affine=False):
         super().__init__()
         self.eps = epsilon
         self.affine = affine
         if self.affine:
-            self.weight = nn.Parameter(torch.Tensor(1, num_features,1,1,1))
-            self.bias = nn.Parameter(torch.Tensor(1, num_features,1,1,1))
+            self.weight = nn.Parameter(torch.Tensor(1, num_features,1,1))
+            self.bias = nn.Parameter(torch.Tensor(1, num_features,1,1))
             self.weight.data.uniform_()
             self.bias.data.zero_()
 
     def forward(self, x, weight=None, bias=None):
-        x = x - torch.mean(x, dim=[2, 3, 4], keepdim=True)
+        x = x - torch.mean(x, dim=[2, 3], keepdim=True)
         norm = torch.sqrt(
-            torch.mean(x**2, dim=[2, 3, 4], keepdim=True) + self.eps)
+            torch.mean(x**2, dim=[2, 3], keepdim=True) + self.eps)
+        x = x / norm
+        isnot_input_none = weight is not None and bias is not None
+        assert (isnot_input_none and not self.affine) or (not isnot_input_none and self.affine)
+        if self.affine:
+            x = x*self.weight + self.bias
+        else:
+            x = x*weight + bias
+        return x
+
+class InstanceNormLayer_line(nn.Module):
+    """Implements instance normalization layer."""
+    def __init__(self, num_features, epsilon=1e-8, affine=False):
+        super().__init__()
+        self.eps = epsilon
+        self.affine = affine
+        if self.affine:
+            self.weight = nn.Parameter(torch.Tensor(1, num_features, 1))
+            self.bias = nn.Parameter(torch.Tensor(1, num_features, 1))
+            self.weight.data.uniform_()
+            self.bias.data.zero_()
+
+    def forward(self, x, weight=None, bias=None):
+        x = x - torch.mean(x, dim=[2,], keepdim=True)
+        norm = torch.sqrt(
+            torch.mean(x**2, dim=[2,], keepdim=True) + self.eps)
         x = x / norm
         isnot_input_none = weight is not None and bias is not None
         assert (isnot_input_none and not self.affine) or (not isnot_input_none and self.affine)
@@ -1070,6 +1096,7 @@ class UpsamplingLayer(nn.Module):
 
 
 class FeatureVolume(nn.Module):
+    #TODO:conv3D instance_norm 
     def __init__(
         self,
         feat_res=32,
@@ -1082,28 +1109,40 @@ class FeatureVolume(nn.Module):
         super().__init__()
         self.num_stages = int(np.log2(feat_res // init_res)) + 1
 
-        self.const = nn.Parameter(
-            torch.ones(1, base_channels, init_res, init_res, init_res))
+        self.plane = nn.Parameter(torch.ones(3, 1, base_channels,  init_res, init_res))
+        self.line = nn.Parameter(torch.ones(3, 1, base_channels, init_res))
+
         inplanes = base_channels
         outplanes = base_channels
 
         self.stage_channels = []
         for i in range(self.num_stages):
-            conv = nn.Conv3d(inplanes,
-                             outplanes,
-                             kernel_size=(3, 3, 3),
-                             padding=(1, 1, 1))
-            self.stage_channels.append(outplanes)
-            self.add_module(f'layer{i}', conv)
-            instance_norm = InstanceNormLayer(num_features=outplanes, affine=False)
+            for xyz in range(3):
+                conv_plane = nn.Conv2d(inplanes,
+                                outplanes,
+                                kernel_size=(3, 3),
+                                padding=(1, 1))
+                conv_line = nn.Conv1d(inplanes,
+                                outplanes,
+                                kernel_size= 3 ,
+                                padding= 1 )
 
-            self.add_module(f'instance_norm{i}', instance_norm)
+                self.add_module(f'layer_plane_{xyz}_{i}', conv_plane)
+                self.add_module(f'layer_line_{xyz}_{i}', conv_line)
+
+                instance_norm_plane = InstanceNormLayer_plane(num_features=outplanes, affine=False)
+                instance_norm_line = InstanceNormLayer_line(num_features=outplanes, affine=False)
+
+                self.add_module(f'instance_norm_plane_{xyz}_{i}', instance_norm_plane)
+                self.add_module(f'instance_norm_line_{xyz}_{i}', instance_norm_line)
+
+            self.stage_channels.append(outplanes)
             inplanes = outplanes
             outplanes = max(outplanes // 2, output_channels)
             if i == self.num_stages - 1:
                 outplanes = output_channels
 
-        self.mapping_network = nn.Linear(w_dim, sum(self.stage_channels) * 2)
+        self.mapping_network = nn.Linear(w_dim, sum(self.stage_channels) * 6)
         self.mapping_network.apply(kaiming_leaky_init)
         with torch.no_grad(): self.mapping_network.weight *= 0.25
         self.upsample = UpsamplingLayer()
@@ -1111,21 +1150,38 @@ class FeatureVolume(nn.Module):
 
     def forward(self, w, **kwargs):
         scale_shifts = self.mapping_network(w)
-        scales = scale_shifts[..., :scale_shifts.shape[-1]//2]
-        shifts = scale_shifts[..., scale_shifts.shape[-1]//2:]
+        for i in range(3):
+            scale_shift=scale_shifts[...,i*(scale_shifts.shape[-1]//3):(i+1)*(scale_shifts.shape[-1]//3)]
+            scales = scale_shift[..., :scale_shift.shape[-1]//2]
+            shifts = scale_shift[..., scale_shift.shape[-1]//2:]
 
-        x = self.const.repeat(w.shape[0], 1, 1, 1, 1)
-        for idx in range(self.num_stages):
-            if idx != 0:
-                x = self.upsample(x)
-            conv_layer = self.__getattr__(f'layer{idx}')
-            x = conv_layer(x)
-            instance_norm = self.__getattr__(f'instance_norm{idx}')
-            scale = scales[:, sum(self.stage_channels[:idx]):sum(self.stage_channels[:idx + 1])]
-            shift = shifts[:, sum(self.stage_channels[:idx]):sum(self.stage_channels[:idx + 1])]
-            scale = scale.view(scale.shape + (1, 1, 1))
-            shift = shift.view(shift.shape + (1, 1, 1))
-            x = instance_norm(x, weight=scale, bias=shift)
-            x = self.lrelu(x)
+            plane = self.plane[i].repeat(w.shape[0], 1, 1, 1, )
+            line = self.line[i].repeat(w.shape[0], 1, 1)
 
-        return x
+            for idx in range(self.num_stages):
+                if idx != 0:
+                    plane = self.upsample(plane)
+                    line = self.upsample(line)
+                conv_layer_plane = self.__getattr__(f'layer_plane_{i}_{idx}')
+                conv_layer_line = self.__getattr__(f'layer_line_{i}_{idx}')
+
+                plane = conv_layer_plane(plane)
+                line = conv_layer_line(line)
+                instance_norm_plane = self.__getattr__(f'instance_norm_plane_{i}_{idx}')
+                instance_norm_line = self.__getattr__(f'instance_norm_line_{i}_{idx}')
+                scale = scales[:, sum(self.stage_channels[:idx]):sum(self.stage_channels[:idx + 1])]
+                shift = shifts[:, sum(self.stage_channels[:idx]):sum(self.stage_channels[:idx + 1])]
+                scale_plane = scale.view(scale.shape + (1, 1))
+                shift_plane = shift.view(shift.shape + (1, 1))
+                scale_line = scale.view(scale.shape + (1,))
+                shift_line = shift.view(shift.shape + (1,))
+                plane = instance_norm_plane(plane, weight=scale_plane, bias=shift_plane)
+                line = instance_norm_line(line, weight=scale_line, bias=shift_line)
+                plane = self.lrelu(plane)
+                line = self.lrelu(line)
+            if i==0:
+                plane_ret = torch.zeros((3,) + plane.shape)
+                line_ret = torch.zeros((3,) + line.shape)
+            plane_ret[i]=plane
+            line_ret[i]=line
+        return plane_ret.cuda(), line_ret[...,None].cuda()
