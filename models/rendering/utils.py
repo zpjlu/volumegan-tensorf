@@ -101,6 +101,40 @@ def grid_sample_2d(image, optical):
 
     return out_val
 
+def grid_sample_1d(image, optical):
+    """grid sample images by the optical in 3D format
+    image: batch_size, channel, W
+    optical: batch_size, W, 1
+    """
+    N, C, IW = image.shape
+    _, W, _ = optical.shape
+
+    ix = optical[..., 0]
+
+
+
+    ix = ((ix + 1) / 2) * (IW - 1);
+
+    with torch.no_grad():
+        ix_l = torch.floor(ix);
+        ix_r = ix_l + 1;
+
+    
+    l = (ix - ix_l);
+    r = (ix_r - ix);
+
+    with torch.no_grad():
+        torch.clamp(ix_l, 0, IW - 1, out=ix_l)
+        torch.clamp(ix_r, 0, IW - 1, out=ix_r)
+
+    l_val = torch.gather(image, 2,ix_l.long().view(N, 1, W).repeat(1, C, 1))
+    r_val = torch.gather(image, 2,ix_r.long().view(N, 1, W).repeat(1, C, 1))
+
+
+    out_val = (l_val.view(N, C,  W) * l.view(N, 1, W) + r_val.view(N, C,  W) * r.view(N, 1, W))
+
+    return out_val
+
 def interpolate_feature(points, plane, line, bounds):
     """
     points: batch_size, num_point, 3
@@ -120,13 +154,12 @@ def interpolate_feature(points, plane, line, bounds):
     app_feature = []
     bs=grid_coords.shape[0]
     coordinate_plane = torch.stack((grid_coords[..., matMode[0]], grid_coords[..., matMode[1]], grid_coords[..., matMode[2]])).detach().view(bs, 3, -1, 1, 2)
-    coordinate_line = torch.stack((grid_coords[..., vecMode[0]], grid_coords[..., vecMode[1]], grid_coords[..., vecMode[2]]))
-    coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).detach().view(bs, 3, -1, 1, 2)
+    coordinate_line = torch.stack((grid_coords[..., vecMode[0]], grid_coords[..., vecMode[1]], grid_coords[..., vecMode[2]])).detach().view(bs, 3, -1, 1)
 
     plane_coef_point,line_coef_point = [],[]
     for idx_plane in range(len(plane)):
         plane_coef_point.append(grid_sample_2d(plane[idx_plane], coordinate_plane[:,idx_plane])[...,0])
-        line_coef_point.append(grid_sample_2d(line[idx_plane], coordinate_line[:,idx_plane])[...,0])
+        line_coef_point.append(grid_sample_1d(line[idx_plane], coordinate_line[:,idx_plane]))
     plane_coef_point, line_coef_point = torch.cat(plane_coef_point,dim=1), torch.cat(line_coef_point,dim=1)
 
     return plane_coef_point * line_coef_point

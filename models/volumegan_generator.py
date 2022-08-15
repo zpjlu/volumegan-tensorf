@@ -1184,4 +1184,4 @@ class FeatureVolume(nn.Module):
                 line_ret = torch.zeros((3,) + line.shape)
             plane_ret[i]=plane
             line_ret[i]=line
-        return plane_ret.cuda(), line_ret[...,None].cuda()
+        return plane_ret.cuda(), line_ret.cuda()
