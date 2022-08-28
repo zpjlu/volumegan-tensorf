@@ -1096,7 +1096,6 @@ class UpsamplingLayer(nn.Module):
 
 
 class FeatureVolume(nn.Module):
-    #TODO:conv3D instance_norm 
     def __init__(
         self,
         feat_res=32,
@@ -1109,8 +1108,8 @@ class FeatureVolume(nn.Module):
         super().__init__()
         self.num_stages = int(np.log2(feat_res // init_res)) + 1
 
-        self.plane = nn.Parameter(torch.ones(3, 1, base_channels,  init_res, init_res))
-        self.line = nn.Parameter(torch.ones(3, 1, base_channels, init_res))
+        self.plane = nn.Parameter(torch.ones(1, 3, base_channels,  init_res, init_res))
+        self.line = nn.Parameter(torch.ones(1, 3, base_channels, init_res))
 
         inplanes = base_channels
         outplanes = base_channels
@@ -1150,13 +1149,14 @@ class FeatureVolume(nn.Module):
 
     def forward(self, w, **kwargs):
         scale_shifts = self.mapping_network(w)
+        plane_ret, line_ret = [], []
         for i in range(3):
             scale_shift=scale_shifts[...,i*(scale_shifts.shape[-1]//3):(i+1)*(scale_shifts.shape[-1]//3)]
             scales = scale_shift[..., :scale_shift.shape[-1]//2]
             shifts = scale_shift[..., scale_shift.shape[-1]//2:]
 
-            plane = self.plane[i].repeat(w.shape[0], 1, 1, 1, )
-            line = self.line[i].repeat(w.shape[0], 1, 1)
+            plane = self.plane[:,i].repeat(w.shape[0], 1, 1, 1, )
+            line = self.line[:,i].repeat(w.shape[0], 1, 1)
 
             for idx in range(self.num_stages):
                 if idx != 0:
@@ -1179,9 +1179,6 @@ class FeatureVolume(nn.Module):
                 line = instance_norm_line(line, weight=scale_line, bias=shift_line)
                 plane = self.lrelu(plane)
                 line = self.lrelu(line)
-            if i==0:
-                plane_ret = torch.zeros((3,) + plane.shape)
-                line_ret = torch.zeros((3,) + line.shape)
-            plane_ret[i]=plane
-            line_ret[i]=line
-        return plane_ret.cuda(), line_ret.cuda()
+            plane_ret.append(plane)
+            line_ret.append(line)
+        return torch.stack(plane_ret,dim=1).cuda(), torch.stack(line_ret,dim=1).cuda()

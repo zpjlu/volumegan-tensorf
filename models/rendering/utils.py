@@ -138,7 +138,7 @@ def grid_sample_1d(image, optical):
 def interpolate_feature(points, plane, line, bounds):
     """
     points: batch_size, num_point, 3
-    volume: batch_size, num_channel, d, h, w
+    volume: batch_size, 3, num_channel, h, w
     bounds: 2, 3
     """
     grid_coords = get_grid_coords(points, bounds)
@@ -157,9 +157,9 @@ def interpolate_feature(points, plane, line, bounds):
     coordinate_line = torch.stack((grid_coords[..., vecMode[0]], grid_coords[..., vecMode[1]], grid_coords[..., vecMode[2]])).detach().view(bs, 3, -1, 1)
 
     plane_coef_point,line_coef_point = [],[]
-    for idx_plane in range(len(plane)):
-        plane_coef_point.append(grid_sample_2d(plane[idx_plane], coordinate_plane[:,idx_plane])[...,0])
-        line_coef_point.append(grid_sample_1d(line[idx_plane], coordinate_line[:,idx_plane]))
+    for idx_plane in range(3):
+        plane_coef_point.append(grid_sample_2d(plane[:,idx_plane], coordinate_plane[:,idx_plane])[...,0])
+        line_coef_point.append(grid_sample_1d(line[:,idx_plane], coordinate_line[:,idx_plane]))
     plane_coef_point, line_coef_point = torch.cat(plane_coef_point,dim=1), torch.cat(line_coef_point,dim=1)
 
     return plane_coef_point * line_coef_point
